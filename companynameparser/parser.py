@@ -1,0 +1,383 @@
+# -*- coding: utf-8 -*-
+"""
+@author:XuMing(xuming624@qq.com)
+@description: 
+"""
+import sys
+import os
+
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  
+sys.path.append(parent_dir)
+
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+model_path = os.path.join(current_dir, "bertTrain/models/bert_brand_ner/final")
+
+import time
+from companynameparser.logger import logger
+from companynameparser.tokenizer import jieba_tokenize
+from .bertTrain.brand_extractor import BrandExtractor
+
+pwd_path = os.path.abspath(os.path.dirname(__file__))
+# 地址文件
+place_path = os.path.join(pwd_path, 'data/china_place.txt')
+# 地址补充文件，单字类
+place_single_path = os.path.join(pwd_path, 'data/place_single.txt')
+# 商标文件
+brand_path = os.path.join(pwd_path, 'data/brand.txt')
+# 行业文件
+trade_path = os.path.join(pwd_path, 'data/trade.txt')
+# 行业补充文件，单字类
+trade_single_path = os.path.join(pwd_path, 'data/trade_single.txt')
+# 后缀文件
+suffix_path = os.path.join(pwd_path, 'data/suffix.txt')
+# 后缀补充文件，单字类
+suffix_single_path = os.path.join(pwd_path, 'data/suffix_single.txt')
+# 词语分隔符，split word by comma
+split_sep = ','
+
+
+class Parser:
+    """
+    Name Parser for Company Name
+    """
+
+    def __init__(
+            self,
+            place_file=place_path,
+            brand_file=brand_path,
+            trade_file=trade_path,
+            suffix_file=suffix_path,
+            place_single_file=place_single_path,
+            trade_single_file=trade_single_path,
+            suffix_single_file=suffix_single_path,
+            custom_name_split_file='',
+    ):
+        self.name = 'company_name_parser'
+        self.place_file = place_file
+        self.brand_file = brand_file
+        self.trade_file = trade_file
+        self.suffix_file = suffix_file
+        self.place_single_file = place_single_file
+        self.trade_single_file = trade_single_file
+        self.suffix_single_file = suffix_single_file
+        self.custom_name_split_file = custom_name_split_file
+        self.places = None
+        self.brands = None
+        self.trades = None
+        self.suffixes = None
+        self.place_single = None
+        self.trade_single = None
+        self.suffix_single = None
+        self.custom_name_split = None
+        self.symbols = ['《', '》', '（', '）', '(', ')']
+        self.inited = False
+        self.brand_extractor = BrandExtractor(model_path)
+        
+    def init(self):
+        if not self.inited:
+            s = time.time()
+            self.places = self.load_dict(self.place_file)
+            self.brands = self.load_dict(self.brand_file)
+            self.trades = self.load_dict(self.trade_file)
+            self.suffixes = self.load_dict(self.suffix_file)
+            self.place_single = self.load_dict(self.place_single_file)
+            self.trade_single = self.load_dict(self.trade_single_file)
+            self.suffix_single = self.load_dict(self.suffix_single_file)
+            self.custom_name_split = self.load_name_split(self.custom_name_split_file)
+            self.inited = True
+            # logger.debug('dict load ok, cost {:.2f} s.'.format(time.time() - s))
+
+    def set_custom_split_file(self, file_path):
+        self.custom_name_split_file = file_path
+        self.custom_name_split = self.load_name_split(self.custom_name_split_file)
+        logger.debug('set_custom_split_file done, custom_name_split size: {}'.format(len(self.custom_name_split)))
+
+    @staticmethod
+    def load_dict(file_path):
+        res = dict()
+        if file_path and os.path.exists(file_path):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    terms = line.split()
+                    if len(terms) == 2:
+                        key = terms[0]
+                        val = terms[1]
+                    elif len(terms) == 1:
+                        key = terms[0]
+                        val = '1'
+                    else:
+                        continue
+                    res[key] = val
+        return res
+
+    @staticmethod
+    def load_name_split(file_path):
+        res = dict()
+        if file_path and os.path.exists(file_path):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    terms = line.split(',')
+                    if line.startswith('#') or len(terms) <= 1:
+                        continue
+                    # Company_name place brand trade suffix symbol
+                    name = terms[0]
+                    place = terms[1] if len(terms) >= 2 else ''
+                    brand = terms[2] if len(terms) >= 3 else ''
+                    trade = terms[3] if len(terms) >= 4 else ''
+                    suffix = terms[4] if len(terms) >= 5 else ''
+                    symbol = terms[5] if len(terms) >= 6 else ''
+                    res[name] = {'place': place,
+                                 'brand': brand,
+                                 'trade': trade,
+                                 'suffix': suffix,
+                                 'symbol': symbol}
+        return res
+
+    @staticmethod
+    def findall(string, s):
+        """
+        Find all str index
+        :param string:
+        :param s:
+        :return: indies
+        """
+        res = []
+        index = 0
+        while True:
+            index = string.find(s, index)
+            if index != -1:
+                res.append(index)
+                index += len(s)
+            else:
+                break
+        return res
+
+    @staticmethod
+    def _extract_token(tokens, data_dict):
+        """
+        Extract token words
+        :param tokens: query segmented words
+        :param data_dict: dict
+        :return: tuple(token, left_words)
+        """
+        res = []
+        left_words = []
+        for w, p, q in tokens:
+            if w in data_dict:
+                res.append((w, p, q))
+            else:
+                left_words.append((w, p, q))
+        return res, left_words
+
+    @staticmethod
+    def link_near_words(tokens):
+        new_tokens = []
+        if not tokens:
+            return new_tokens
+        i = 0
+        w, p, q = tokens[i]
+        while i < len(tokens):
+            i += 1
+            if i == len(tokens):
+                new_tokens.append((w, p, q))
+            else:
+                w_i, p_i, q_i = tokens[i]
+                # next word near before word
+                if p_i == q:
+                    w = w + w_i
+                    p = p
+                    q = q_i
+                else:
+                    new_tokens.append((w, p, q))
+                    w, p, q = tokens[i]
+        return new_tokens
+
+    def postprocess(self, left_words, places, brands, trades, suffixes):
+        """
+        Extract Company name brand words
+        :param left_words: query segmented words
+        :param places: places
+        :param brands: brands
+        :param trades: trades
+        :param suffixes: suffixes
+        :return: tuple(places, brands, trades, suffixes)
+        """
+        lefts = []
+        for w, p, q in left_words:
+            if len(w) == 1:
+                # Single char
+                if w in self.trade_single:
+                    if len(left_words) == 2 and len(left_words[0][0]) == 1 and len(
+                            left_words[1][0]) == 1 and not brands:
+                        # 处理："天津曰新塑料制品有限公司"
+                        brands.append((w, p, q))
+                    else:
+                        trades.append((w, p, q))
+                elif w in self.place_single:
+                    places.append((w, p, q))
+                elif w in self.suffix_single:
+                    suffixes.append((w, p, q))
+                else:
+                    # Left single char, which brand not single char
+                    lefts.append((w, p, q))
+            else:
+                if w[-1] in self.place_single:
+                    places.append((w, p, q))
+                else:
+                    brands.append((w, p, q))
+        if len(lefts) == 1:
+            if len(places) > 1 and places[0][2] == lefts[0][1] and places[1][1] == lefts[0][2]:
+                # 处理："永安市燕南街扶晴梅百货商行"
+                places.extend(lefts)
+            elif len(trades) > 1 and lefts[0][2] == trades[0][1] and not brands:
+                # 处理："中节能秦皇岛环保有限公司"
+                brands.extend(lefts)
+                brands.append(trades[0])
+                trades.remove(trades[0])
+            else:
+                brands.extend(lefts)
+        else:
+            brands.extend(lefts)
+        if len(places) > 1:
+            places.sort(key=lambda k: k[1])
+            places = self.link_near_words(places)  # Deal with link near words
+        if len(brands) > 1:
+            brands.sort(key=lambda k: k[1])
+            brands = self.link_near_words(brands)
+        return places, brands, trades, suffixes
+
+    @staticmethod
+    def _get_leave_tokens(tokens, start, end):
+        """
+        String out of [start, end]
+        :param tokens: list, [(word, start_idx, end_idx),...]
+        :param start: int, start_idx
+        :param end: int, end_idx
+        :return: list, < start_idx || > end_idx
+        """
+        res = []
+        for w, p, q in tokens:
+            if p < start:
+                res.append((w, p, q))
+            elif p >= end:
+                res.append((w, p, q))
+        return res
+
+    def parse(self, name, pos_sensitive=False, enable_word_segment=False, **kwargs):
+        """
+        Parse One Record
+        :param name: Company name
+        :param pos_sensitive: if True, output position index; default False
+        :param enable_word_segment: if True, output word split by comma, else no comma; default False
+        :return: dict
+        """
+        name = name.strip()
+        res = {'name': name, 'place': '', 'brand': '', 'trade': '', 'suffix': '', 'symbol': ''}
+        # Not Chinese company name
+        if (not name) or (not is_chinese(name[0])):
+            return res
+
+        self.init()
+        places, brands, trades, suffixes, symbols = [], [], [], [], []
+        # Tokens: [(word, start_index, end_index), ...]
+        tokens = jieba_tokenize(name)
+
+        if self.custom_name_split:
+            # Custom name split
+            for k, v in self.custom_name_split.items():
+                start = name.find(k)
+                if start > -1:
+                    end = start + len(k)
+                    tokens = self._get_leave_tokens(tokens, start, end)
+                    place_len = len(v['place'])
+                    brand_len = len(v['brand'])
+                    trade_len = len(v['trade'])
+                    suffix_len = len(v['suffix'])
+                    c_places = [(v['place'], start, start + place_len)] if place_len > 0 else []
+                    c_brands = [(v['brand'], start + place_len, start + place_len + brand_len)] if brand_len > 0 else []
+                    c_trades = [(v['trade'], start + place_len + brand_len,
+                                 start + place_len + brand_len + trade_len)] if trade_len > 0 else []
+                    c_suffixes = [(v['suffix'], start + place_len + brand_len + trade_len,
+                                   start + place_len + brand_len + trade_len + suffix_len)] if suffix_len > 0 else []
+                    places.extend(c_places)
+                    brands.extend(c_brands)
+                    trades.extend(c_trades)
+                    suffixes.extend(c_suffixes)
+                    break
+
+        if tokens:
+            # Extract token order: symbol, place, suffix, trade, brand
+            t_symbols, left_words = self._extract_token(tokens, self.symbols)
+            t_places, left_words = self._extract_token(left_words, self.places)
+            t_suffixes, left_words = self._extract_token(left_words, self.suffixes)
+            t_trades, left_words = self._extract_token(left_words, self.trades)
+            t_brands, left_words = self._extract_token(left_words, self.brands)
+            # Postprocess
+            t_places, t_brands, t_trades, t_suffixes = self.postprocess(left_words, t_places, t_brands, t_trades,
+                                                                        t_suffixes)
+            places.extend(t_places)
+            brands.extend(t_brands)
+            trades.extend(t_trades)
+            suffixes.extend(t_suffixes)
+            symbols.extend(t_symbols)
+
+        # 3. 引入brand_extractor模型提取品牌（新增逻辑）
+        # 模型预测品牌（假设模型返回格式为 [(品牌词, 起始索引, 结束索引), ...]）
+        model_brands = self.brand_extractor.extract(name)  # 需根据模型实际接口调整
+        # 合并模型提取的品牌与现有品牌（去重）
+        existing_brand_words = {w[0] for w in brands}
+        for brand in model_brands:
+            brand_word = brand[0]
+            if brand_word not in existing_brand_words:
+                brands.append(brand)
+                existing_brand_words.add(brand_word)
+
+
+        # Sort token idx
+        if len(places) > 1:
+            places.sort(key=lambda k: k[1])
+        if len(brands) > 1:
+            brands.sort(key=lambda k: k[1])
+        if len(trades) > 1:
+            trades.sort(key=lambda k: k[1])
+        if len(suffixes) > 1:
+            suffixes.sort(key=lambda k: k[1])
+
+        # Link split tokens
+        if not enable_word_segment:
+            places = self.link_near_words(places)
+            brands = self.link_near_words(brands)
+            trades = self.link_near_words(trades)
+            suffixes = self.link_near_words(suffixes)
+
+        # Pos Sensitive Enable
+        res['place'] = places if pos_sensitive else split_sep.join([w[0] for w in places])
+        res['brand'] = brands if pos_sensitive else split_sep.join([w[0] for w in brands])
+        res['trade'] = trades if pos_sensitive else split_sep.join([w[0] for w in trades])
+        res['suffix'] = suffixes if pos_sensitive else split_sep.join([w[0] for w in suffixes])
+        res['symbol'] = symbols if pos_sensitive else split_sep.join([w[0] for w in symbols])
+
+        return res
+
+
+def is_chinese(uchar):
+    """判断一个unicode是否是汉字"""
+    return '\u4e00' <= uchar <= '\u9fa5'
+
+
+def is_number(uchar):
+    """判断一个unicode是否是数字"""
+    return '\u0030' <= uchar <= '\u0039'
+
+
+def is_alphabet(uchar):
+    """判断一个unicode是否是英文字母"""
+    return '\u0041' <= uchar <= '\u005a' or '\u0061' <= uchar <= '\u007a'
+
+
+def is_other(uchar):
+    """判断是否非汉字，数字和英文字符"""
+    return not (is_chinese(uchar) or is_number(uchar) or is_alphabet(uchar))
