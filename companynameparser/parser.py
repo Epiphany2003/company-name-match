@@ -11,12 +11,12 @@ sys.path.append(parent_dir)
 
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
-model_path = os.path.join(current_dir, "bertTrain/models/bert_brand_ner/final")
+model_path = os.path.join(parent_dir, "bertTrain/models/bert_brand_ner/final")
 
 import time
 from companynameparser.logger import logger
 from companynameparser.tokenizer import jieba_tokenize
-from .bertTrain.brand_extractor import BrandExtractor
+from bertTrain.brand_extractor import BrandExtractor
 
 pwd_path = os.path.abspath(os.path.dirname(__file__))
 # 地址文件
@@ -52,6 +52,7 @@ class Parser:
             trade_single_file=trade_single_path,
             suffix_single_file=suffix_single_path,
             custom_name_split_file='',
+            bert_model_path=model_path,
     ):
         self.name = 'company_name_parser'
         self.place_file = place_file
@@ -72,8 +73,10 @@ class Parser:
         self.custom_name_split = None
         self.symbols = ['《', '》', '（', '）', '(', ')']
         self.inited = False
-        self.brand_extractor = BrandExtractor(model_path)
-        
+        self.bert_model_path = bert_model_path or os.path.join(pwd_path, "bertTrain/models/bert_brand_ner/final")
+        self.brand_extractor = BrandExtractor(self.bert_model_path)  # 初始化 BERT 提取器
+        self.inited = False
+
     def init(self):
         if not self.inited:
             s = time.time()
@@ -195,7 +198,7 @@ class Parser:
                     w, p, q = tokens[i]
         return new_tokens
 
-    def postprocess(self, left_words, places, brands, trades, suffixes):
+    '''def postprocess(self, left_words, places, brands, trades, suffixes):
         """
         Extract Company name brand words
         :param left_words: query segmented words
@@ -205,6 +208,7 @@ class Parser:
         :param suffixes: suffixes
         :return: tuple(places, brands, trades, suffixes)
         """
+        
         lefts = []
         for w, p, q in left_words:
             if len(w) == 1:
@@ -247,7 +251,40 @@ class Parser:
         if len(brands) > 1:
             brands.sort(key=lambda k: k[1])
             brands = self.link_near_words(brands)
-        return places, brands, trades, suffixes
+        return places, brands, trades, suffixes'''
+    
+    def postprocess(self, left_words, places, brands, trades, suffixes):
+        """仅处理地区、行业、后缀，不处理品牌（品牌由 BERT 提取）"""
+        lefts = []
+        for w, p, q in left_words:
+            if len(w) == 1:
+                if w in self.trade_single:
+                    trades.append((w, p, q))
+                elif w in self.place_single:
+                    places.append((w, p, q))
+                elif w in self.suffix_single:
+                    suffixes.append((w, p, q))
+                else:
+                    lefts.append((w, p, q))
+            else:
+                if w[-1] in self.place_single:
+                    places.append((w, p, q))
+                else:
+                    lefts.append((w, p, q))  # 不再将剩余词加入品牌
+
+        # 处理其他字段的拼接
+        if len(places) > 1:
+            places.sort(key=lambda k: k[1])
+            places = self.link_near_words(places)
+        if len(trades) > 1:
+            trades.sort(key=lambda k: k[1])
+            trades = self.link_near_words(trades)
+        if len(suffixes) > 1:
+            suffixes.sort(key=lambda k: k[1])
+            suffixes = self.link_near_words(suffixes)
+        
+        # 品牌直接返回空（BERT 已单独处理）
+        return places, [], trades, suffixes
 
     @staticmethod
     def _get_leave_tokens(tokens, start, end):
@@ -285,6 +322,16 @@ class Parser:
         # Tokens: [(word, start_index, end_index), ...]
         tokens = jieba_tokenize(name)
 
+        # -------------- 关键修改：用 BERT 提取品牌 --------------
+        # 调用 BERT 模型获取品牌（假设返回字符串，如 "腾讯"）
+        bert_brand = self.brand_extractor.extract(name)
+        # 将 BERT 结果转换为 (品牌词, 起始索引, 结束索引) 元组
+        if bert_brand and isinstance(bert_brand, str) and bert_brand in name:
+            start_idx = name.find(bert_brand)
+            end_idx = start_idx + len(bert_brand)
+            brands = [(bert_brand, start_idx, end_idx)]  # 确保格式正确
+        # ------------------------------------------------------
+
         if self.custom_name_split:
             # Custom name split
             for k, v in self.custom_name_split.items():
@@ -293,17 +340,17 @@ class Parser:
                     end = start + len(k)
                     tokens = self._get_leave_tokens(tokens, start, end)
                     place_len = len(v['place'])
-                    brand_len = len(v['brand'])
+                    #brand_len = len(v['brand'])
                     trade_len = len(v['trade'])
                     suffix_len = len(v['suffix'])
                     c_places = [(v['place'], start, start + place_len)] if place_len > 0 else []
-                    c_brands = [(v['brand'], start + place_len, start + place_len + brand_len)] if brand_len > 0 else []
+                    #c_brands = [(v['brand'], start + place_len, start + place_len + brand_len)] if brand_len > 0 else []
                     c_trades = [(v['trade'], start + place_len + brand_len,
                                  start + place_len + brand_len + trade_len)] if trade_len > 0 else []
                     c_suffixes = [(v['suffix'], start + place_len + brand_len + trade_len,
                                    start + place_len + brand_len + trade_len + suffix_len)] if suffix_len > 0 else []
                     places.extend(c_places)
-                    brands.extend(c_brands)
+                    #brands.extend(c_brands)
                     trades.extend(c_trades)
                     suffixes.extend(c_suffixes)
                     break
@@ -314,27 +361,19 @@ class Parser:
             t_places, left_words = self._extract_token(left_words, self.places)
             t_suffixes, left_words = self._extract_token(left_words, self.suffixes)
             t_trades, left_words = self._extract_token(left_words, self.trades)
-            t_brands, left_words = self._extract_token(left_words, self.brands)
+            #t_brands, left_words = self._extract_token(left_words, self.brands)
             # Postprocess
-            t_places, t_brands, t_trades, t_suffixes = self.postprocess(left_words, t_places, t_brands, t_trades,
-                                                                        t_suffixes)
+            #  注意：不再从词典提取品牌，直接使用 BERT 结果
+            '''t_places, t_brands, t_trades, t_suffixes = self.postprocess(left_words, t_places, t_brands, t_trades,
+                                                                        t_suffixes)'''
+            
+            t_places, _, t_trades, t_suffixes = self.postprocess(left_words, t_places, [], t_trades, t_suffixes)
+            
             places.extend(t_places)
-            brands.extend(t_brands)
+            # brands.extend(t_brands)
             trades.extend(t_trades)
             suffixes.extend(t_suffixes)
             symbols.extend(t_symbols)
-
-        # 3. 引入brand_extractor模型提取品牌（新增逻辑）
-        # 模型预测品牌（假设模型返回格式为 [(品牌词, 起始索引, 结束索引), ...]）
-        model_brands = self.brand_extractor.extract(name)  # 需根据模型实际接口调整
-        # 合并模型提取的品牌与现有品牌（去重）
-        existing_brand_words = {w[0] for w in brands}
-        for brand in model_brands:
-            brand_word = brand[0]
-            if brand_word not in existing_brand_words:
-                brands.append(brand)
-                existing_brand_words.add(brand_word)
-
 
         # Sort token idx
         if len(places) > 1:
