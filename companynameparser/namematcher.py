@@ -44,8 +44,8 @@ def replace_bank_name(input_str):
     return input_str
 
 
-# keywords = ["股份", "有限公司", "集团", "责任", "有限责任公司", "分行", "营业部", "控股", "股权", "投资", "贸易", "市"]
-keywords = []
+keywords = ["股份", "有限公司", "集团", "责任", "有限责任公司", "分行", "营业部", "控股", "股权", "投资", "贸易", "市"]
+# keywords = []
 
 def remove_keywords(input_str):
     pattern = "|".join(map(re.escape, keywords))
@@ -95,8 +95,8 @@ def calculate_company_similarity(company1, company2):
             if (company1['name'] in row and company2['name'] in row) or (company2['name'] in row and company1['name'] in row):
                 return 100
 
-    '''if is_branch_company(company1['suffix']) or is_branch_company(company2['suffix']) or is_branch_company(company2['brand']) or is_branch_company(company1['brand']):
-        return 0 '''
+    if is_branch_company(company1['suffix']) or is_branch_company(company2['suffix']) or is_branch_company(company2['brand']) or is_branch_company(company1['brand']):
+        return 0
     
     # 先检查是否为同品牌的分支机构
     is_branch1 = is_branch_company(company1['suffix'])
